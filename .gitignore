@@ -47,3 +47,6 @@ langfuse/
 # Logs
 *.log
 logs/
+
+# Eval outputs (generated reports, not source data)
+eval/reports/

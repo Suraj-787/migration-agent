@@ -46,7 +46,10 @@ COLLECTION_CONFIGS: dict[str, CollectionConfig] = {
 
 
 def get_qdrant_client(url: str | None = None) -> AsyncQdrantClient:
-    return AsyncQdrantClient(url=url or os.environ.get("QDRANT_URL", "http://localhost:6333"))
+    return AsyncQdrantClient(
+        url=url or os.environ.get("QDRANT_URL", "http://localhost:6333"),
+        timeout=60,
+    )
 
 
 async def ensure_collection(

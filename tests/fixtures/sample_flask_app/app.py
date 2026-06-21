@@ -22,7 +22,7 @@ def create_app(config=None) -> Flask:
     return app
 
 
-from flask import Blueprint
+from flask import Blueprint  # noqa: E402
 
 users_bp = Blueprint("users", __name__, url_prefix="/users")
 posts_bp = Blueprint("posts", __name__, url_prefix="/posts")
