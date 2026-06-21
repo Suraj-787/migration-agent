@@ -1,4 +1,12 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
+
+
+class SearchHit(BaseModel):
+    id: str
+    score: float
+    payload: dict[str, Any]
 
 
 class CodeChunk(BaseModel):

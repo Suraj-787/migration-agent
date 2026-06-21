@@ -4,18 +4,19 @@ Every LLM call in the system must go through ``get_router().get_client()``.
 Never instantiate LangChain chat models elsewhere.
 """
 
+from __future__ import annotations
+
 import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.language_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
-from langfuse.langchain import CallbackHandler
 from loguru import logger
 
 from agents.tracing import make_callback_handler
@@ -113,7 +114,7 @@ class LLMRouter:
         session_id: str | None = None,
         run_id: str | None = None,
         tags: list[str] | None = None,
-    ) -> tuple[BaseChatModel, list[CallbackHandler]]:
+    ) -> tuple[BaseChatModel, list[Any]]:
         """Return a configured chat client and its Langfuse callback handler.
 
         Args:
@@ -134,12 +135,17 @@ class LLMRouter:
             provider, model = _FALLBACK_PROVIDER, _FALLBACK_MODEL
 
         client = _build_client(provider, model)
-        cb = make_callback_handler(
-            session_id=session_id,
-            trace_id=run_id,
-            tags=(tags or []) + [f"role:{role}", f"provider:{provider}"],
-        )
-        return client, [cb]
+        try:
+            cb = make_callback_handler(
+                session_id=session_id,
+                trace_id=run_id,
+                tags=(tags or []) + [f"role:{role}", f"provider:{provider}"],
+            )
+            callbacks: list[Any] = [cb]
+        except Exception:
+            # langchain not installed — tracing disabled, LLM calls still work
+            callbacks = []
+        return client, callbacks
 
     def record_rate_limit_error(self, role: Role) -> None:
         """Call when a 429 is returned for this role's provider."""
