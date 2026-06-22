@@ -13,16 +13,43 @@ from pydantic import BaseModel
 
 from api.logging_config import configure_logging
 from api.routes.feedback import router as feedback_router
+from api.routes.migrations import router as migrations_router
 from api.routes.search import router as search_router
 
 load_dotenv()
 configure_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
 
 
+def _db_dsn() -> str:
+    return (
+        f"postgresql+asyncpg://{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
+        f"@{os.environ.get('POSTGRES_HOST', 'localhost')}"
+        f":{os.environ.get('POSTGRES_PORT', '5432')}"
+        f"/{os.environ['POSTGRES_DB']}"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Migration Agent API starting up")
-    yield
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from rag.dep_graph import create_tables
+    from workflows.checkpointer import checkpointer_context
+    from workflows.graph import graph_builder
+
+    engine = create_async_engine(_db_dsn())
+    await create_tables(engine)
+    app.state.db_engine = engine
+    logger.info("SQLAlchemy engine ready — dependency_graphs table ensured")
+
+    async with checkpointer_context() as checkpointer:
+        app.state.checkpointer = checkpointer
+        app.state.graph = graph_builder.compile(checkpointer=checkpointer)
+        logger.info("LangGraph migration graph compiled and ready")
+        yield
+
+    await engine.dispose()
     logger.info("Migration Agent API shutting down")
     from agents.tracing import flush
     flush()
@@ -31,6 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Migration Agent API", version="0.1.0", lifespan=lifespan)
 app.include_router(search_router)
 app.include_router(feedback_router)
+app.include_router(migrations_router)
 
 
 class ServiceStatuses(BaseModel):

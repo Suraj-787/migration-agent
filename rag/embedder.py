@@ -24,7 +24,9 @@ class VoyageEmbedder:
             raise ValueError("VOYAGE_API_KEY not set")
         self._client = voyageai.Client(api_key=key)
 
-    async def _embed_raw(self, texts: list[str], input_type: str) -> list[list[float]]:
+    async def _embed_raw(
+        self, texts: list[str], input_type: str, retry_rate_limits: bool = True
+    ) -> list[list[float]]:
         for attempt in range(5):
             try:
                 result = await asyncio.to_thread(
@@ -38,6 +40,10 @@ class VoyageEmbedder:
             except Exception as exc:
                 msg = str(exc).lower()
                 is_rate_limit = "rate" in msg or "429" in msg or "too many" in msg
+                if is_rate_limit and not retry_rate_limits:
+                    # Fail fast so callers (e.g. planner RAG) can skip immediately
+                    # instead of burning 19s on exponential backoff.
+                    raise
                 if is_rate_limit and attempt < 4:
                     wait = float(2**attempt) + 1.0
                     logger.warning(
@@ -94,6 +100,10 @@ class VoyageEmbedder:
         return await self._embed_batched(texts, input_type="query", label="query batch")
 
     async def embed_query(self, text: str) -> list[float]:
-        """Embed a single query string with query input_type."""
-        embeddings = await self._embed_raw([text], input_type="query")
+        """Embed a single query string with query input_type.
+
+        Fails fast on rate limits (no retry) so callers can skip RAG gracefully
+        instead of blocking for ~19s of exponential backoff.
+        """
+        embeddings = await self._embed_raw([text], input_type="query", retry_rate_limits=False)
         return embeddings[0]

@@ -27,17 +27,52 @@ Role = Literal["planner", "transform", "critic", "classifier"]
 INPUT_TOKEN_LIMIT = 8_000
 OUTPUT_TOKEN_LIMIT = 4_000
 
+# Per-role output cap. Providers (notably Groq) bill the *reserved* max_tokens
+# against rate limits, so roles that emit small structured replies must not
+# reserve the full 4K. Planner/classifier return short JSON; transform/critic
+# must emit whole corrected files, so they keep the full budget.
+_ROLE_OUTPUT_TOKENS: dict[Role, int] = {
+    "planner": 512,
+    "classifier": 512,
+    "transform": OUTPUT_TOKEN_LIMIT,
+    "critic": OUTPUT_TOKEN_LIMIT,
+}
+
 # Role → (provider, model_id)
+# NOTE: planner and critic temporarily routed to Groq — Gemini project access is
+# currently denied (403) and OpenRouter free tier is rate-limited.
 _ROLE_MODEL: dict[Role, tuple[str, str]] = {
-    "planner": ("gemini", "gemini-2.5-flash"),
+    "planner": ("groq", "llama-3.3-70b-versatile"),
     "transform": ("openrouter", "qwen/qwen3-coder:free"),
-    "critic": ("gemini", "gemini-2.5-flash"),
+    "critic": ("groq", "llama-3.3-70b-versatile"),
     "classifier": ("groq", "llama-3.3-70b-versatile"),
 }
 
-# Fallback when a primary provider circuit trips
-_FALLBACK_PROVIDER = "openrouter"
-_FALLBACK_MODEL = "qwen/qwen3-coder:free"
+# Per-role fallback cascade — each entry is tried in order when the previous
+# provider's circuit trips.  Must use a DIFFERENT provider than the primary.
+# Groq roles: Groq → OpenRouter (free) → stop
+# OpenRouter roles: OpenRouter → Groq → stop
+# NOTE: qwen/qwen3-235b-a22b:free was discontinued (now 404 — "unavailable for
+# free"). Replaced with meta-llama/llama-3.3-70b-instruct:free, which is live and
+# returns proper 429s so the rate-limit/circuit logic works instead of hard-failing.
+_ROLE_FALLBACK: dict[Role, list[tuple[str, str]]] = {
+    "planner": [
+        ("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
+        ("gemini", "gemini-2.0-flash"),
+    ],
+    "transform": [
+        ("groq", "llama-3.3-70b-versatile"),
+        ("gemini", "gemini-2.0-flash"),
+    ],
+    "critic": [
+        ("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
+        ("gemini", "gemini-2.0-flash"),
+    ],
+    "classifier": [
+        ("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
+        ("gemini", "gemini-2.0-flash"),
+    ],
+}
 
 _CIRCUIT_THRESHOLD = 3         # consecutive rate-limit errors before trip
 _CIRCUIT_COOLDOWN_SECS = 300.0  # 5 minutes
@@ -73,8 +108,10 @@ class _CircuitBreaker:
 _breakers: dict[str, _CircuitBreaker] = defaultdict(lambda: _CircuitBreaker())
 
 
-def _build_client(provider: str, model: str) -> BaseChatModel:
-    kwargs: dict = {"max_tokens": OUTPUT_TOKEN_LIMIT}
+def _build_client(
+    provider: str, model: str, max_output_tokens: int = OUTPUT_TOKEN_LIMIT
+) -> BaseChatModel:
+    kwargs: dict = {"max_tokens": max_output_tokens}
     if provider == "gemini":
         return ChatGoogleGenerativeAI(
             model=model,
@@ -126,15 +163,26 @@ class LLMRouter:
         provider, model = _ROLE_MODEL[role]
 
         if _breakers[provider].is_open():
-            logger.warning(
-                "Circuit open for provider={}, routing role={} to fallback {}",
-                provider,
-                role,
-                _FALLBACK_MODEL,
-            )
-            provider, model = _FALLBACK_PROVIDER, _FALLBACK_MODEL
+            # Walk the fallback cascade until we find an open provider.
+            for fb_provider, fb_model in _ROLE_FALLBACK[role]:
+                if not _breakers[fb_provider].is_open():
+                    logger.warning(
+                        "Circuit open for provider={}, routing role={} to fallback {}/{}",
+                        provider, role, fb_provider, fb_model,
+                    )
+                    provider, model = fb_provider, fb_model
+                    break
+            else:
+                # All fallbacks also tripped — use the last one and let it fail loudly.
+                fb_provider, fb_model = _ROLE_FALLBACK[role][-1]
+                logger.error(
+                    "All providers tripped for role={}, forcing last fallback {}/{}",
+                    role, fb_provider, fb_model,
+                )
+                provider, model = fb_provider, fb_model
 
-        client = _build_client(provider, model)
+        max_output = _ROLE_OUTPUT_TOKENS.get(role, OUTPUT_TOKEN_LIMIT)
+        client = _build_client(provider, model, max_output)
         try:
             cb = make_callback_handler(
                 session_id=session_id,
