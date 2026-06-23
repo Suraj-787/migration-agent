@@ -53,7 +53,7 @@ class MigrationStartResponse(BaseModel):
 class MigrationStateResponse(BaseModel):
     thread_id: str
     repo_path: str
-    final_status: Literal["pending", "success", "partial", "failed"]
+    final_status: Literal["pending", "success", "partial", "failed", "cost_ceiling_exceeded"]
     task_count: int
     result_count: int
     current_batch: list[str]
@@ -114,6 +114,9 @@ async def start_migration(
     req: StartMigrationRequest, request: Request
 ) -> MigrationStartResponse:
     """Build the dependency graph, persist it, then kick off the migration graph."""
+    if getattr(request.app.state, "shutdown_event", None) and request.app.state.shutdown_event.is_set():
+        raise HTTPException(status_code=503, detail="Server is shutting down — no new migrations accepted")
+
     if not req.repo_path.strip():
         raise HTTPException(status_code=422, detail="repo_path must not be empty")
 
@@ -170,7 +173,11 @@ async def start_migration(
                 "Migration run failed — thread_id={} error={}", thread_id, exc
             )
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    active_tasks: set[asyncio.Task] = getattr(request.app.state, "active_tasks", set())  # type: ignore[type-arg]
+    active_tasks.add(task)
+    task.add_done_callback(active_tasks.discard)
+
     logger.info(
         "Migration started — thread_id={} dep_graph_id={} repo={} {}→{}",
         thread_id,
@@ -218,17 +225,21 @@ async def stream_migration(thread_id: str, request: Request) -> StreamingRespons
     Event types:
     - ``waiting``    — migration not yet in checkpointer
     - ``checkpoint`` — graph advanced; includes node name, counts, status
+    - ``cost``       — current accumulated estimated_cost_usd (emitted every 10 s)
     - ``done``       — terminal status reached (success / partial / failed)
     - ``timeout``    — 30-minute hard stop
     - ``error``      — checkpointer read failure
     """
     checkpointer = request.app.state.checkpointer
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
-    terminal_statuses = {"success", "partial", "failed"}
+    terminal_statuses = {"success", "partial", "failed", "cost_ceiling_exceeded"}
 
     async def _event_generator() -> AsyncIterator[str]:
+        from workflows.cost import get_run_cost
+
         last_step = -1
         stream_start = time.monotonic()
+        last_cost_event = time.monotonic() - 10.0  # fire immediately on first tick
 
         while True:
             if await request.is_disconnected():
@@ -238,6 +249,17 @@ async def stream_migration(thread_id: str, request: Request) -> StreamingRespons
                 payload: dict[str, Any] = {"event": "timeout", "thread_id": thread_id}
                 yield f"data: {json.dumps(payload)}\n\n"
                 break
+
+            now = time.monotonic()
+            if now - last_cost_event >= 10.0:
+                current_cost = await get_run_cost(thread_id)
+                cost_payload: dict[str, Any] = {
+                    "event": "cost",
+                    "thread_id": thread_id,
+                    "estimated_cost_usd": current_cost,
+                }
+                yield f"data: {json.dumps(cost_payload)}\n\n"
+                last_cost_event = now
 
             try:
                 checkpoint_tuple = await checkpointer.aget_tuple(config)

@@ -245,12 +245,6 @@ async def _fix_with_llm(
 ) -> None:
     """Ask the critic LLM for a fully corrected file and overwrite *file_path*."""
     router = get_router()
-    client, callbacks = router.get_client(
-        "critic",
-        session_id=session_id,
-        run_id=run_id,
-        tags=["critic", "fix"],
-    )
     human = (
         f"## Migration: {spec.source_framework} → {spec.target_framework}\n\n"
         f"## Original migration diff\n```diff\n{diff[:_MAX_ERROR_CHARS]}\n```\n\n"
@@ -262,12 +256,13 @@ async def _fix_with_llm(
         SystemMessage(content=_CRITIC_FIX_SYSTEM),
         HumanMessage(content=human),
     ]
-    try:
-        response = await client.ainvoke(messages, config={"callbacks": callbacks})
-        router.record_success("critic")
-    except Exception:
-        router.record_rate_limit_error("critic")
-        raise
+    response = await router.ainvoke_with_retry(
+        "critic",
+        messages,
+        session_id=session_id,
+        run_id=run_id,
+        tags=["critic", "fix"],
+    )
 
     raw = str(response.content) if hasattr(response, "content") else str(response)
     corrected = _extract_code_block(raw)

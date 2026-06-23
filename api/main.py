@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Literal
 
@@ -38,6 +39,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from workflows.checkpointer import checkpointer_context
     from workflows.graph import graph_builder
 
+    # Shutdown coordination: set by the signal handler, checked by route handlers.
+    app.state.shutdown_event = asyncio.Event()
+    # Tracks asyncio.Task objects for in-flight migration runs so shutdown can
+    # wait for them to reach their next LangGraph checkpoint (max 30 s).
+    app.state.active_tasks = set()  # type: ignore[var-annotated]
+
+    loop = asyncio.get_running_loop()
+
+    def _on_shutdown_signal() -> None:
+        logger.info(
+            "Shutdown signal received — stopping new /migrations requests, "
+            "draining {} in-flight run(s)",
+            len(app.state.active_tasks),
+        )
+        app.state.shutdown_event.set()
+
+    loop.add_signal_handler(signal.SIGTERM, _on_shutdown_signal)
+    loop.add_signal_handler(signal.SIGINT, _on_shutdown_signal)
+
     engine = create_async_engine(_db_dsn())
     await create_tables(engine)
     app.state.db_engine = engine
@@ -49,8 +69,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("LangGraph migration graph compiled and ready")
         yield
 
+    # Graceful drain: wait up to 30 s for in-flight graph.ainvoke() calls to
+    # reach their next checkpoint node. AsyncPostgresSaver persists state
+    # automatically at each node boundary, so we never lose partial progress.
+    active = list(app.state.active_tasks)
+    if active:
+        logger.info("Graceful shutdown: waiting up to 30s for {} task(s)", len(active))
+        _done, pending = await asyncio.wait(active, timeout=30.0)
+        if pending:
+            logger.warning(
+                "{} task(s) did not finish within 30s — cancelling", len(pending)
+            )
+            for t in pending:
+                t.cancel()
+
     await engine.dispose()
-    logger.info("Migration Agent API shutting down")
+    logger.info("Migration Agent API shut down cleanly")
     from agents.tracing import flush
     flush()
 

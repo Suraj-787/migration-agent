@@ -60,9 +60,10 @@ class MigrationReport(BaseModel):
     success_rate: float
     total_tokens_used: int
     estimated_cost_usd: float
+    model_breakdown: dict[str, float] = {}
     per_module_branch_names: dict[str, str]
     duration_seconds: float
-    final_status: Literal["success", "partial", "failed"]
+    final_status: Literal["success", "partial", "failed", "cost_ceiling_exceeded"]
 
 
 class MigrationState(TypedDict):
@@ -82,7 +83,7 @@ class MigrationState(TypedDict):
     passed_paths: Annotated[list[str], operator.add]
     current_batch: list[str]
     attempt_count: dict[str, int]
-    final_status: Literal["pending", "success", "partial", "failed"]
+    final_status: Literal["pending", "success", "partial", "failed", "cost_ceiling_exceeded"]
     # Set at invocation time; used by finalize_node for timing and report identity.
     thread_id: str
     started_at: float
