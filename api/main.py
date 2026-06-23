@@ -16,6 +16,7 @@ from api.logging_config import configure_logging
 from api.routes.feedback import router as feedback_router
 from api.routes.migrations import router as migrations_router
 from api.routes.search import router as search_router
+from dashboard.routes import router as dashboard_router
 
 load_dotenv()
 configure_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -93,6 +94,7 @@ app = FastAPI(title="Migration Agent API", version="0.1.0", lifespan=lifespan)
 app.include_router(search_router)
 app.include_router(feedback_router)
 app.include_router(migrations_router)
+app.include_router(dashboard_router)
 
 
 class ServiceStatuses(BaseModel):
