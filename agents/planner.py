@@ -197,50 +197,25 @@ async def _classify_module(
     spec: MigrationSpec,
     session_id: str | None,
 ) -> _PlannerLLMOutput:
-    """Call the planner LLM once per module, with one automatic fallback retry.
+    """Classify one module via the router's retry wrapper with structured output.
 
-    On the first failure (e.g. Gemini 403), records enough errors to trip the
-    circuit breaker so that get_client() switches to the fallback provider on
-    the second attempt.
+    Backoff, circuit-breaker recording, and the global concurrency semaphore are
+    all handled by ainvoke_with_retry; chain_fn wires in with_structured_output.
     """
     router = get_router()
     messages = _build_prompt(module, file_content, code_hits, doc_hits, spec)
-    last_exc: Exception | None = None
-
-    for attempt in range(2):  # attempt 0 = primary, attempt 1 = fallback
-        client, callbacks = router.get_client(
+    result = cast(
+        _PlannerLLMOutput,
+        await router.ainvoke_with_retry(
             "planner",
+            messages,
             session_id=session_id,
             tags=["planner", f"module:{module}"],
-        )
-        structured = client.with_structured_output(_PlannerLLMOutput)
-        try:
-            result = cast(
-                _PlannerLLMOutput,
-                await structured.ainvoke(messages, config={"callbacks": callbacks}),  # type: ignore[arg-type]
-            )
-            router.record_success("planner")
-            logger.debug(
-                "Planner classified module={} complexity={}", module, result.complexity
-            )
-            return result
-        except Exception as exc:
-            last_exc = exc
-            msg = str(exc).lower()
-            is_rate_limit = (
-                "429" in msg or "rate limit" in msg or "too many" in msg
-                or "quota" in msg or "resource_exhausted" in msg
-            )
-            if is_rate_limit:
-                # Record 3 errors to guarantee the circuit trips before the next attempt.
-                for _ in range(3):
-                    router.record_rate_limit_error("planner")
-            logger.warning(
-                "Planner attempt={} failed for module={} (rate_limit={}): {}",
-                attempt + 1, module, is_rate_limit, exc,
-            )
-
-    raise last_exc  # type: ignore[misc]
+            chain_fn=lambda c: c.with_structured_output(_PlannerLLMOutput),
+        ),
+    )
+    logger.debug("Planner classified module={} complexity={}", module, result.complexity)
+    return result
 
 
 # ---------------------------------------------------------------------------

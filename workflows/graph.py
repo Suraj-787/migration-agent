@@ -48,9 +48,6 @@ from workflows.state import (
     TaskResult,
 )
 
-# Groq Llama 3.3-70B blended input+output estimate ($0.59/M in, $0.79/M out).
-_COST_PER_TOKEN_USD = 0.60 / 1_000_000
-
 
 # ---------------------------------------------------------------------------
 # Redis lock helpers
@@ -113,12 +110,19 @@ async def plan_node(state: MigrationState) -> dict:  # type: ignore[type-arg]
 
 
 def _select_ready_batch(state: MigrationState, batch_size: int = 3) -> list[MigrationTask]:
-    """Return up to *batch_size* tasks not yet represented in task_results."""
+    """Return up to *batch_size* tasks not yet represented in task_results.
+
+    Also deduplicates by module_path within the batch: if two tasks share a path
+    and neither is completed yet, only the first is selected.  The second will be
+    picked up in the next dispatch round once the first has a result.
+    """
     completed_paths = {r.module_path for r in state.get("task_results", [])}
+    selected_paths: set[str] = set()
     ready = []
     for task in state.get("task_queue", []):
-        if task.module_path not in completed_paths:
+        if task.module_path not in completed_paths and task.module_path not in selected_paths:
             ready.append(task)
+            selected_paths.add(task.module_path)
             if len(ready) >= batch_size:
                 break
     return ready
@@ -316,6 +320,7 @@ async def rollback_node(state: MigrationState) -> dict:  # type: ignore[type-arg
 @observe(name="finalize")
 async def finalize_node(state: MigrationState) -> dict:  # type: ignore[type-arg]
     """Build a MigrationReport, persist it to Postgres, and return final_status."""
+    from workflows.cost import ceiling_was_exceeded, flush_run_cost, get_run_breakdown
     from workflows.report import persist_report  # lazy import
 
     results = state.get("task_results", [])
@@ -341,10 +346,24 @@ async def finalize_node(state: MigrationState) -> dict:  # type: ignore[type-arg
 
     started_at: float = state.get("started_at", time.time())  # type: ignore[call-overload]
     duration = max(0.0, time.time() - started_at)
+    thread_id: str = state.get("thread_id", "unknown")  # type: ignore[call-overload]
+    run_id: str = str(state["dep_graph_id"])
+
+    # Pull accurate cost data from Redis counters accumulated during the run.
+    cost_breakdown = await get_run_breakdown(thread_id)
+    estimated_cost = cost_breakdown["total_cost_usd"]
+    model_breakdown: dict[str, float] = cost_breakdown["model_breakdown"]
+
+    # Flush Redis counters to migration_runs table (non-fatal on error).
+    await flush_run_cost(thread_id, run_id, started_at)
 
     prior_status = state.get("final_status", "pending")
-    if prior_status == "partial":
-        new_status: Literal["success", "partial", "failed"] = "partial"
+    if await ceiling_was_exceeded(thread_id):
+        new_status: Literal["success", "partial", "failed", "cost_ceiling_exceeded"] = (
+            "cost_ceiling_exceeded"
+        )
+    elif prior_status == "partial":
+        new_status = "partial"
     elif failed_count > 0 and succeeded == 0:
         new_status = "failed"
     elif failed_count > 0:
@@ -352,7 +371,6 @@ async def finalize_node(state: MigrationState) -> dict:  # type: ignore[type-arg
     else:
         new_status = "success"
 
-    thread_id: str = state.get("thread_id", "unknown")  # type: ignore[call-overload]
     success_rate = succeeded / total_tasks if total_tasks > 0 else 1.0
 
     report = MigrationReport(
@@ -362,7 +380,8 @@ async def finalize_node(state: MigrationState) -> dict:  # type: ignore[type-arg
         failed=failed_count,
         success_rate=success_rate,
         total_tokens_used=total_tokens,
-        estimated_cost_usd=total_tokens * _COST_PER_TOKEN_USD,
+        estimated_cost_usd=estimated_cost,
+        model_breakdown=model_breakdown,
         per_module_branch_names=per_module_branches,
         duration_seconds=duration,
         final_status=new_status,
@@ -375,7 +394,7 @@ async def finalize_node(state: MigrationState) -> dict:  # type: ignore[type-arg
         succeeded,
         total_tasks,
         total_tokens,
-        report.estimated_cost_usd,
+        estimated_cost,
         duration,
         thread_id,
     )

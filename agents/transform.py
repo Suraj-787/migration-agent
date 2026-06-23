@@ -38,17 +38,6 @@ _RAG_DOC_K = 6
 _RAG_CODE_K = 3
 _MAX_DIFF_LINES = 60
 
-# Limits concurrent Qwen3 Coder calls across all parallel fan-out invocations.
-_transform_sem: asyncio.Semaphore | None = None
-
-
-def _get_sem() -> asyncio.Semaphore:
-    """Lazy-init semaphore so it binds to the running event loop."""
-    global _transform_sem
-    if _transform_sem is None:
-        _transform_sem = asyncio.Semaphore(3)
-    return _transform_sem
-
 
 # ---------------------------------------------------------------------------
 # Code-block extraction
@@ -247,25 +236,19 @@ async def _call_llm(
     session_id: str | None,
     label: str,
 ) -> tuple[str, int]:
-    """Invoke the transform LLM under the concurrency semaphore.
+    """Invoke the transform LLM via the router's retry wrapper.
 
+    Concurrency is capped by the global Semaphore(5) inside ainvoke_with_retry.
     Returns ``(raw_response_text, total_tokens_used)``.
     """
     router = get_router()
-    async with _get_sem():
-        client, callbacks = router.get_client(
-            "transform",
-            session_id=session_id,
-            run_id=run_id,
-            tags=["transform", f"label:{label}"],
-        )
-        try:
-            response = await client.ainvoke(messages, config={"callbacks": callbacks})
-            router.record_success("transform")
-        except Exception:
-            router.record_rate_limit_error("transform")
-            raise
-
+    response = await router.ainvoke_with_retry(
+        "transform",
+        messages,
+        session_id=session_id,
+        run_id=run_id,
+        tags=["transform", f"label:{label}"],
+    )
     raw = str(response.content) if hasattr(response, "content") else str(response)
     tokens_used = 0
     if hasattr(response, "response_metadata"):
