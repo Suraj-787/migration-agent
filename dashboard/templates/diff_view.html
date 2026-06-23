@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Diff: {{ module_name }} — Migration Agent{% endblock %}
+
+{% block breadcrumb %}
+<a href="/dashboard/" class="text-gray-400 hover:text-gray-200">Runs</a>
+<span class="text-gray-600 mx-2">/</span>
+<a href="/dashboard/runs/{{ thread_id }}" class="text-gray-400 hover:text-gray-200">
+  {{ thread_id[:8] }}…
+</a>
+<span class="text-gray-600 mx-2">/</span>
+<span class="text-gray-400">{{ module_name }}</span>
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-lg font-bold text-gray-200">{{ module_name }}</h1>
+    <p class="text-xs text-gray-500 mt-0.5 font-mono">{{ module_path }}</p>
+    <p class="text-xs text-gray-600 mt-0.5 font-mono">branch: {{ branch_name }}</p>
+  </div>
+  <form method="post"
+        action="/dashboard/runs/{{ thread_id }}/approve/{{ module_slug }}">
+    <button type="submit"
+            class="px-4 py-2 rounded text-sm bg-green-800 hover:bg-green-700 text-green-100 font-bold transition-colors"
+            onclick="return confirm('Merge {{ module_name }} into migration-staging?')">
+      ✓ Approve &amp; Merge to Staging
+    </button>
+  </form>
+</div>
+
+<div class="overflow-x-auto rounded border border-gray-700 bg-gray-950">
+  {{ diff_table | safe }}
+</div>
+
+<p class="text-xs text-gray-600 mt-2">
+  Left: original on disk &nbsp;·&nbsp; Right: migrated ({{ branch_name }})
+</p>
+{% endblock %}

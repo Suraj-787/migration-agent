@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Runs — Migration Agent{% endblock %}
+
+{% block breadcrumb %}
+<span class="text-gray-400">Runs</span>
+{% endblock %}
+
+{% block content %}
+<h1 class="text-lg font-bold text-gray-200 mb-4">Migration Runs</h1>
+
+{% if not runs %}
+<p class="text-gray-500">No migration runs found. Start one via <code class="text-indigo-400">POST /migrations</code>.</p>
+{% else %}
+<div class="overflow-x-auto rounded border border-gray-700">
+  <table class="w-full text-xs">
+    <thead class="bg-gray-800 text-gray-400 uppercase tracking-wider">
+      <tr>
+        <th class="px-4 py-2 text-left">Thread ID</th>
+        <th class="px-4 py-2 text-left">Status</th>
+        <th class="px-4 py-2 text-left">Started</th>
+        <th class="px-4 py-2 text-right">Completion</th>
+        <th class="px-4 py-2 text-right">Est. Cost</th>
+        <th class="px-4 py-2"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-800">
+      {% for run in runs %}
+      <tr class="hover:bg-gray-800 transition-colors">
+        <td class="px-4 py-2 font-mono text-gray-300">{{ run.thread_id_short }}…</td>
+        <td class="px-4 py-2">
+          {% if run.final_status == "success" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-green-900 text-green-300">success</span>
+          {% elif run.final_status == "partial" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-yellow-900 text-yellow-300">partial</span>
+          {% elif run.final_status == "failed" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-red-900 text-red-300">failed</span>
+          {% elif run.final_status == "cost_ceiling_exceeded" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-orange-900 text-orange-300">cost ceiling</span>
+          {% else %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-400">{{ run.final_status }}</span>
+          {% endif %}
+        </td>
+        <td class="px-4 py-2 text-gray-400">{{ run.started_at_str }}</td>
+        <td class="px-4 py-2 text-right">
+          <span class="text-gray-300">{{ run.succeeded }}/{{ run.total_tasks }}</span>
+          <span class="text-gray-600 ml-1">({{ run.completion_pct }}%)</span>
+        </td>
+        <td class="px-4 py-2 text-right text-gray-300">
+          ${{ "%.5f"|format(run.estimated_cost_usd) }}
+        </td>
+        <td class="px-4 py-2 text-right">
+          <a href="/dashboard/runs/{{ run.thread_id }}"
+             class="text-indigo-400 hover:text-indigo-300 underline">
+            View →
+          </a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

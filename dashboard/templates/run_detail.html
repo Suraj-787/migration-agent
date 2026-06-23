@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+
+{% block title %}Run {{ thread_id_short }}… — Migration Agent{% endblock %}
+
+{% block breadcrumb %}
+<a href="/dashboard/" class="text-gray-400 hover:text-gray-200">Runs</a>
+<span class="text-gray-600 mx-2">/</span>
+<span class="text-gray-400">{{ thread_id_short }}…</span>
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-lg font-bold text-gray-200">
+      Run <span class="text-indigo-400 font-mono">{{ thread_id_short }}…</span>
+    </h1>
+    {% if repo_path %}
+    <p class="text-xs text-gray-500 mt-0.5">{{ repo_path }}</p>
+    {% endif %}
+  </div>
+  <div class="flex items-center gap-3">
+    {% if final_status == "success" %}
+      <span class="px-2 py-1 rounded text-xs bg-green-900 text-green-300">success</span>
+    {% elif final_status == "partial" %}
+      <span class="px-2 py-1 rounded text-xs bg-yellow-900 text-yellow-300">partial</span>
+    {% elif final_status == "failed" %}
+      <span class="px-2 py-1 rounded text-xs bg-red-900 text-red-300">failed</span>
+    {% elif final_status == "cost_ceiling_exceeded" %}
+      <span class="px-2 py-1 rounded text-xs bg-orange-900 text-orange-300">cost ceiling</span>
+    {% else %}
+      <span class="px-2 py-1 rounded text-xs bg-gray-700 text-gray-400">{{ final_status }}</span>
+    {% endif %}
+
+    {% if has_failed %}
+    <form method="post" action="/dashboard/runs/{{ thread_id }}/rerun">
+      <button type="submit"
+              class="px-3 py-1 rounded text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 transition-colors">
+        ↺ Rerun Failed
+      </button>
+    </form>
+    {% endif %}
+
+    <a href="/dashboard/runs/{{ thread_id }}/stream"
+       class="px-3 py-1 rounded text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+      ⟳ Event Log
+    </a>
+  </div>
+</div>
+
+{% if flash %}
+<div class="mb-4 px-4 py-2 rounded bg-green-900 border border-green-700 text-green-300 text-xs">
+  {{ flash | replace("+", " ") }}
+</div>
+{% endif %}
+
+{% if tasks %}
+<div class="overflow-x-auto rounded border border-gray-700">
+  <table class="w-full text-xs">
+    <thead class="bg-gray-800 text-gray-400 uppercase tracking-wider">
+      <tr>
+        <th class="px-4 py-2 text-left">Module</th>
+        <th class="px-4 py-2 text-left">Status</th>
+        <th class="px-4 py-2 text-right">Tokens</th>
+        <th class="px-4 py-2 text-left">Branch</th>
+        <th class="px-4 py-2"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-800">
+      {% for task in tasks %}
+      <tr class="hover:bg-gray-800 transition-colors">
+        <td class="px-4 py-2 font-mono text-gray-300 max-w-xs truncate" title="{{ task.module_path }}">
+          {{ task.module_name }}
+        </td>
+        <td class="px-4 py-2">
+          {% if task.status == "done" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-green-900 text-green-300">done</span>
+          {% elif task.status == "failed" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-red-900 text-red-300">failed</span>
+          {% elif task.status == "in_progress" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-yellow-900 text-yellow-300">in progress</span>
+          {% else %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-400">pending</span>
+          {% endif %}
+        </td>
+        <td class="px-4 py-2 text-right text-gray-400">{{ task.tokens_used }}</td>
+        <td class="px-4 py-2 font-mono text-gray-500 text-xs truncate max-w-xs" title="{{ task.branch_name }}">
+          {{ task.branch_name }}
+        </td>
+        <td class="px-4 py-2 text-right">
+          {% if task.can_diff %}
+          <a href="/dashboard/runs/{{ thread_id }}/diff/{{ task.module_slug }}"
+             class="text-indigo-400 hover:text-indigo-300 underline">
+            View diff →
+          </a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="text-gray-500 text-xs">No tasks found in checkpoint state.</p>
+{% endif %}
+
+{# ── Event Log ── #}
+<div class="mt-8">
+  <div class="flex items-center justify-between mb-2">
+    <h2 class="text-sm font-bold text-gray-400">Event Log</h2>
+    <button id="toggle-log"
+            onclick="toggleLog()"
+            class="text-xs text-gray-500 hover:text-gray-300 underline">
+      Show
+    </button>
+  </div>
+  <div id="event-log-container" class="hidden">
+    <div id="event-log"
+         class="rounded border border-gray-700 bg-gray-950 p-3 h-64 overflow-y-auto font-mono text-xs text-gray-400 space-y-0.5">
+      <div class="text-gray-600">Connecting to stream…</div>
+    </div>
+    <p class="text-xs text-gray-600 mt-1">
+      Live stream from <code>/migrations/{{ thread_id }}/stream</code>
+    </p>
+  </div>
+</div>
+
+<script>
+  let es = null;
+
+  function toggleLog() {
+    const container = document.getElementById('event-log-container');
+    const btn = document.getElementById('toggle-log');
+    if (container.classList.contains('hidden')) {
+      container.classList.remove('hidden');
+      btn.textContent = 'Hide';
+      startStream();
+    } else {
+      container.classList.add('hidden');
+      btn.textContent = 'Show';
+      if (es) { es.close(); es = null; }
+    }
+  }
+
+  {% if show_stream is defined and show_stream %}
+  // Auto-open stream when loaded from /stream route
+  document.addEventListener('DOMContentLoaded', () => toggleLog());
+  {% endif %}
+
+  function startStream() {
+    const log = document.getElementById('event-log');
+    log.innerHTML = '';
+    if (es) { es.close(); }
+
+    es = new EventSource('/migrations/{{ thread_id }}/stream');
+
+    es.onmessage = function(e) {
+      try {
+        const data = JSON.parse(e.data);
+        const el = document.createElement('div');
+        el.className = eventClass(data.event);
+        el.textContent = formatEvent(data);
+        log.appendChild(el);
+        log.scrollTop = log.scrollHeight;
+        if (data.event === 'done' || data.event === 'timeout') {
+          es.close();
+          es = null;
+        }
+      } catch (_) {}
+    };
+
+    es.onerror = function() {
+      const el = document.createElement('div');
+      el.className = 'text-red-500';
+      el.textContent = '[stream error or closed]';
+      log.appendChild(el);
+      if (es) { es.close(); es = null; }
+    };
+  }
+
+  function eventClass(evt) {
+    const map = {
+      checkpoint: 'text-gray-300',
+      cost: 'text-yellow-600',
+      done: 'text-green-400',
+      timeout: 'text-orange-400',
+      error: 'text-red-400',
+      waiting: 'text-gray-600',
+    };
+    return map[evt] || 'text-gray-400';
+  }
+
+  function formatEvent(data) {
+    const ts = new Date().toTimeString().slice(0, 8);
+    if (data.event === 'checkpoint') {
+      return `[${ts}] checkpoint  node=${data.node || '?'}  status=${data.final_status}  results=${data.result_count}/${data.task_count}`;
+    }
+    if (data.event === 'cost') {
+      return `[${ts}] cost  $${data.estimated_cost_usd.toFixed(6)}`;
+    }
+    if (data.event === 'done') {
+      return `[${ts}] DONE  final_status=${data.final_status}`;
+    }
+    return `[${ts}] ${data.event}  ${JSON.stringify(data).slice(0, 120)}`;
+  }
+</script>
+{% endblock %}
