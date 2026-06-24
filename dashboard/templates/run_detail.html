@@ -68,8 +68,10 @@
     <tbody class="divide-y divide-gray-800">
       {% for task in tasks %}
       <tr class="hover:bg-gray-800 transition-colors">
-        <td class="px-4 py-2 font-mono text-gray-300 max-w-xs truncate" title="{{ task.module_path }}">
-          {{ task.module_name }}
+        <td class="px-4 py-2 font-mono text-gray-300 max-w-xs overflow-hidden whitespace-nowrap"
+            style="direction: rtl; text-overflow: ellipsis; text-align: left;"
+            title="{{ task.module_path }}">
+          {{ task.module_path }}
         </td>
         <td class="px-4 py-2">
           {% if task.status == "done" %}

@@ -49,11 +49,47 @@ def _decode_slug(slug: str) -> str:
     return base64.urlsafe_b64decode(slug.encode()).decode()
 
 
+_CREATE_MIGRATION_REPORTS = """
+CREATE TABLE IF NOT EXISTS migration_reports (
+    thread_id            TEXT PRIMARY KEY,
+    total_tasks          INTEGER          NOT NULL DEFAULT 0,
+    succeeded            INTEGER          NOT NULL DEFAULT 0,
+    failed               INTEGER          NOT NULL DEFAULT 0,
+    success_rate         DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    total_tokens_used    INTEGER          NOT NULL DEFAULT 0,
+    estimated_cost_usd   DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    per_module_branch_names JSONB         NOT NULL DEFAULT '{}',
+    duration_seconds     DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    final_status         TEXT             NOT NULL DEFAULT 'pending',
+    created_at           TIMESTAMPTZ      DEFAULT NOW()
+)
+"""
+
+_CREATE_MIGRATION_RUNS = """
+CREATE TABLE IF NOT EXISTS migration_runs (
+    thread_id            TEXT PRIMARY KEY,
+    run_id               TEXT,
+    total_input_tokens   INTEGER          NOT NULL DEFAULT 0,
+    total_output_tokens  INTEGER          NOT NULL DEFAULT 0,
+    estimated_cost_usd   DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    model_breakdown      JSONB            NOT NULL DEFAULT '{}',
+    started_at           TIMESTAMPTZ,
+    completed_at         TIMESTAMPTZ      DEFAULT NOW()
+)
+"""
+
+
 async def _fetch_runs() -> list[dict[str, Any]]:
-    """Query migration_reports JOIN migration_runs, ordered newest-first."""
+    """Query migration_reports JOIN migration_runs, ordered newest-first.
+
+    Creates both tables if they don't yet exist (finalize_node normally does
+    this lazily; the dashboard needs them available before any run completes).
+    """
     try:
         conn: asyncpg.Connection = await asyncpg.connect(_dsn(), timeout=5.0)
         try:
+            await conn.execute(_CREATE_MIGRATION_REPORTS)
+            await conn.execute(_CREATE_MIGRATION_RUNS)
             rows = await conn.fetch(
                 """
                 SELECT

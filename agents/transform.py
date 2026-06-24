@@ -104,6 +104,9 @@ def _format_rules(spec: MigrationSpec) -> str:
         "- Preserve all business logic exactly — only change framework-specific code\n"
         "- Keep all docstrings, comments, and existing type hints\n"
         f"- Add return type annotations if missing ({spec.target_framework} convention)\n"
+        "- Remove all unused imports from the migrated file before returning it.\n"
+        "- For BaseSettings, import from pydantic_settings not pydantic — "
+        "never from pydantic directly.\n"
     )
 
 
