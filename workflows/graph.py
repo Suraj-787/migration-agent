@@ -37,7 +37,7 @@ from typing import Any, Literal
 
 from langfuse import get_client, observe
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
+from langgraph.types import Send, interrupt
 from loguru import logger
 
 from workflows.state import (
@@ -102,6 +102,60 @@ async def plan_node(state: MigrationState) -> dict:  # type: ignore[type-arg]
     )
     logger.info("[plan] generated {} tasks", len(tasks))
     return {"task_queue": tasks}
+
+
+# ---------------------------------------------------------------------------
+# risk_gate node — human-in-the-loop approval for high-risk tasks
+# ---------------------------------------------------------------------------
+
+
+@observe(name="risk_gate")
+async def risk_gate_node(state: MigrationState) -> dict:  # type: ignore[type-arg]
+    """Gate high-risk tasks through human approval before dispatch.
+
+    Iterates through every task with risk_level=="high" and calls interrupt()
+    once per task (sequentially).  On resume the reviewer's decision arrives as
+    {"approved": True/False}.  Rejected tasks get a TaskResult with
+    status="rejected" so dispatch's completed_paths filter skips them.
+    """
+    tasks: list[MigrationTask] = state.get("task_queue", [])  # type: ignore[call-overload]
+    high_risk = [t for t in tasks if t.risk_level == "high"]
+
+    if not high_risk:
+        logger.info("[risk_gate] no high-risk tasks — proceeding to dispatch")
+        return {}
+
+    logger.info("[risk_gate] {} high-risk task(s) require human approval", len(high_risk))
+    rejected_results: list[TaskResult] = []
+
+    for task in high_risk:
+        logger.info(
+            "[risk_gate] interrupting for approval: module={} task_id={}",
+            task.module_path,
+            task.task_id,
+        )
+        decision: dict[str, Any] = interrupt(  # type: ignore[assignment]
+            {
+                "task_id": task.task_id,
+                "module_path": task.module_path,
+                "risk_level": task.risk_level,
+                "predicted_changes": task.predicted_changes,
+                "description": task.description,
+            }
+        )
+        if decision.get("approved", False):
+            logger.info("[risk_gate] task_id={} approved", task.task_id)
+        else:
+            logger.info("[risk_gate] task_id={} rejected by reviewer", task.task_id)
+            rejected_results.append(
+                TaskResult(
+                    module_path=task.module_path,
+                    status="rejected",
+                    error="Rejected by human reviewer",
+                )
+            )
+
+    return {"task_results": rejected_results} if rejected_results else {}
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +386,7 @@ async def finalize_node(state: MigrationState) -> dict:  # type: ignore[type-arg
     passed = set(state.get("passed_paths", []))  # type: ignore[call-overload]
     critiqued = set(state.get("critiqued_paths", []))  # type: ignore[call-overload]
     succeeded = len(passed)
-    transform_failed = sum(1 for r in results if r.status == "failed")
+    transform_failed = sum(1 for r in results if r.status in ("failed", "rejected"))
     critic_failed = len(critiqued - passed)
     failed_count = transform_failed + critic_failed
     total_tokens = sum(r.tokens_used for r in results)
@@ -434,6 +488,7 @@ def _route_rollback(state: MigrationState) -> Literal["dispatch", "finalize"]:
 graph_builder: StateGraph = StateGraph(MigrationState)
 
 graph_builder.add_node("plan", plan_node)
+graph_builder.add_node("risk_gate", risk_gate_node)
 graph_builder.add_node("dispatch", dispatch_node)
 graph_builder.add_node("transform_task", transform_task_node)  # type: ignore[type-var]
 graph_builder.add_node("test", test_node)
@@ -442,7 +497,8 @@ graph_builder.add_node("rollback", rollback_node)
 graph_builder.add_node("finalize", finalize_node)
 
 graph_builder.add_edge(START, "plan")
-graph_builder.add_edge("plan", "dispatch")
+graph_builder.add_edge("plan", "risk_gate")
+graph_builder.add_edge("risk_gate", "dispatch")
 
 # After dispatch, _route_dispatch fans out via Send or falls through to test.
 graph_builder.add_conditional_edges(
