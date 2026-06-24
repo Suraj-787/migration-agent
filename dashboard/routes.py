@@ -112,11 +112,15 @@ async def _fetch_runs() -> list[dict[str, Any]]:
         return []
 
 
-def _build_task_rows(channel_values: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_task_rows(
+    channel_values: dict[str, Any],
+    awaiting_task_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Build per-module rows by cross-referencing task_queue with task_results."""
     task_queue = channel_values.get("task_queue") or []
     task_results = channel_values.get("task_results") or []
     passed_paths: set[str] = set(channel_values.get("passed_paths") or [])
+    _awaiting = awaiting_task_ids or set()
 
     result_by_path: dict[str, Any] = {}
     for r in task_results:
@@ -137,13 +141,16 @@ def _build_task_rows(channel_values: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(task, dict):
             task_id = task.get("task_id", "")
             module_path = task.get("module_path", "")
+            risk_level = task.get("risk_level", "low")
         else:
             task_id = getattr(task, "task_id", "")
             module_path = getattr(task, "module_path", "")
+            risk_level = getattr(task, "risk_level", "low")
 
         result = result_by_path.get(module_path)
+        awaiting_approval = task_id in _awaiting
         if result is None:
-            status = "pending"
+            status = "awaiting_approval" if awaiting_approval else "pending"
             tokens_used = 0
             branch_name: str | None = None
         else:
@@ -152,10 +159,12 @@ def _build_task_rows(channel_values: dict[str, Any]) -> list[dict[str, Any]]:
                 status = "done"
             elif r_status == "failed":
                 status = "failed"
+            elif r_status == "rejected":
+                status = "rejected"
             elif r_status in ("transformed", "skipped"):
                 status = "in_progress"
             else:
-                status = "pending"
+                status = "awaiting_approval" if awaiting_approval else "pending"
             tokens_used = result["tokens_used"]
             branch_name = result["branch_name"]
 
@@ -166,9 +175,11 @@ def _build_task_rows(channel_values: dict[str, Any]) -> list[dict[str, Any]]:
                 "module_name": Path(module_path).name,
                 "module_slug": _encode_slug(module_path),
                 "status": status,
+                "risk_level": risk_level,
                 "tokens_used": tokens_used,
                 "branch_name": branch_name or "—",
                 "can_diff": status == "done" and branch_name is not None,
+                "awaiting_approval": awaiting_approval,
             }
         )
     return rows
@@ -216,13 +227,35 @@ async def runs_list(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
+async def _get_awaiting_task_ids(thread_id: str, request: Request) -> set[str]:
+    """Return task_ids for tasks currently paused at an interrupt() call."""
+    try:
+        graph = request.app.state.graph
+        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+        snapshot = await graph.aget_state(config)
+        ids: set[str] = set()
+        for task in snapshot.tasks:
+            for intr in getattr(task, "interrupts", ()):
+                val = getattr(intr, "value", None)
+                if isinstance(val, dict) and "task_id" in val:
+                    ids.add(val["task_id"])
+        return ids
+    except Exception as exc:
+        logger.warning("[dashboard] Could not fetch interrupt state: {}", exc)
+        return set()
+
+
 @router.get("/runs/{thread_id}", response_class=HTMLResponse)
 async def run_detail(
     thread_id: str, request: Request, flash: str | None = None
 ) -> Response:
-    channel_values = await _load_checkpoint(thread_id, request)
-    tasks = _build_task_rows(channel_values)
+    channel_values, awaiting_task_ids = await asyncio.gather(
+        _load_checkpoint(thread_id, request),
+        _get_awaiting_task_ids(thread_id, request),
+    )
+    tasks = _build_task_rows(channel_values, awaiting_task_ids)
     has_failed = any(t["status"] == "failed" for t in tasks)
+    has_awaiting = any(t["awaiting_approval"] for t in tasks)
     return templates.TemplateResponse(
         request,
         "run_detail.html",
@@ -232,6 +265,7 @@ async def run_detail(
             "tasks": tasks,
             "flash": flash,
             "has_failed": has_failed,
+            "has_awaiting": has_awaiting,
             "repo_path": channel_values.get("repo_path", ""),
             "final_status": channel_values.get("final_status", "pending"),
         },
@@ -518,5 +552,102 @@ async def rerun_failed(thread_id: str, request: Request) -> RedirectResponse:
             f"/dashboard/runs/{thread_id}"
             f"?flash=Rerun+triggered+for+{len(reset_tasks)}+failed+module(s)"
         ),
+        status_code=303,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /dashboard/runs/{thread_id}/approvals
+# ---------------------------------------------------------------------------
+
+
+@router.get("/runs/{thread_id}/approvals")
+async def list_approvals(thread_id: str, request: Request) -> dict[str, Any]:
+    """Return all tasks currently paused at a human-approval interrupt."""
+    awaiting = await _get_awaiting_task_ids(thread_id, request)
+    channel_values = await _load_checkpoint(thread_id, request)
+    task_queue = channel_values.get("task_queue") or []
+
+    approvals = []
+    for task in task_queue:
+        if isinstance(task, dict):
+            task_id = task.get("task_id", "")
+            module_path = task.get("module_path", "")
+            risk_level = task.get("risk_level", "low")
+            predicted_changes = task.get("predicted_changes", [])
+            description = task.get("description", "")
+        else:
+            task_id = getattr(task, "task_id", "")
+            module_path = getattr(task, "module_path", "")
+            risk_level = getattr(task, "risk_level", "low")
+            predicted_changes = getattr(task, "predicted_changes", [])
+            description = getattr(task, "description", "")
+        if task_id in awaiting:
+            approvals.append(
+                {
+                    "task_id": task_id,
+                    "module_path": module_path,
+                    "risk_level": risk_level,
+                    "predicted_changes": predicted_changes,
+                    "description": description,
+                }
+            )
+    return {"approvals": approvals}
+
+
+# ---------------------------------------------------------------------------
+# POST /dashboard/runs/{thread_id}/approve-task/{task_id}
+# POST /dashboard/runs/{thread_id}/reject-task/{task_id}
+# ---------------------------------------------------------------------------
+
+
+def _resume_graph(
+    thread_id: str, approved: bool, request: Request
+) -> None:
+    """Fire-and-forget: resume the interrupted graph with the approval decision."""
+    from langgraph.types import Command as LGCommand
+
+    graph = request.app.state.graph
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+
+    async def _run() -> None:
+        try:
+            await graph.ainvoke(LGCommand(resume={"approved": approved}), config=config)
+            logger.info(
+                "[dashboard] graph resumed thread_id={} approved={}", thread_id, approved
+            )
+        except Exception as exc:
+            logger.error(
+                "[dashboard] resume failed thread_id={}: {}", thread_id, exc
+            )
+
+    task: asyncio.Task[None] = asyncio.create_task(_run())
+    active_tasks: set[asyncio.Task[None]] = getattr(request.app.state, "active_tasks", set())
+    active_tasks.add(task)
+    task.add_done_callback(active_tasks.discard)
+
+
+@router.post("/runs/{thread_id}/approve-task/{task_id}")
+async def approve_task(
+    thread_id: str, task_id: str, request: Request
+) -> RedirectResponse:
+    """Resume the interrupted graph with approved=True for the given task."""
+    logger.info("[dashboard] approving task_id={} thread_id={}", task_id, thread_id)
+    _resume_graph(thread_id, approved=True, request=request)
+    return RedirectResponse(
+        url=f"/dashboard/runs/{thread_id}?flash=Task+approved%2C+migration+resuming",
+        status_code=303,
+    )
+
+
+@router.post("/runs/{thread_id}/reject-task/{task_id}")
+async def reject_task(
+    thread_id: str, task_id: str, request: Request
+) -> RedirectResponse:
+    """Resume the interrupted graph with approved=False, marking the task rejected."""
+    logger.info("[dashboard] rejecting task_id={} thread_id={}", task_id, thread_id)
+    _resume_graph(thread_id, approved=False, request=request)
+    return RedirectResponse(
+        url=f"/dashboard/runs/{thread_id}?flash=Task+rejected",
         status_code=303,
     )

@@ -31,6 +31,12 @@
       <span class="px-2 py-1 rounded text-xs bg-gray-700 text-gray-400">{{ final_status }}</span>
     {% endif %}
 
+    {% if has_awaiting %}
+      <span class="px-2 py-1 rounded text-xs bg-orange-900 text-orange-300 animate-pulse">
+        ⏳ Awaiting approval
+      </span>
+    {% endif %}
+
     {% if has_failed %}
     <form method="post" action="/dashboard/runs/{{ thread_id }}/rerun">
       <button type="submit"
@@ -59,6 +65,7 @@
     <thead class="bg-gray-800 text-gray-400 uppercase tracking-wider">
       <tr>
         <th class="px-4 py-2 text-left">Module</th>
+        <th class="px-4 py-2 text-left">Risk</th>
         <th class="px-4 py-2 text-left">Status</th>
         <th class="px-4 py-2 text-right">Tokens</th>
         <th class="px-4 py-2 text-left">Branch</th>
@@ -67,19 +74,32 @@
     </thead>
     <tbody class="divide-y divide-gray-800">
       {% for task in tasks %}
-      <tr class="hover:bg-gray-800 transition-colors">
+      <tr class="hover:bg-gray-800 transition-colors {% if task.awaiting_approval %}bg-orange-950{% endif %}">
         <td class="px-4 py-2 font-mono text-gray-300 max-w-xs overflow-hidden whitespace-nowrap"
             style="direction: rtl; text-overflow: ellipsis; text-align: left;"
             title="{{ task.module_path }}">
           {{ task.module_path }}
         </td>
         <td class="px-4 py-2">
+          {% if task.risk_level == "high" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-red-950 text-red-400">high</span>
+          {% elif task.risk_level == "medium" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-yellow-950 text-yellow-400">med</span>
+          {% else %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-gray-800 text-gray-500">low</span>
+          {% endif %}
+        </td>
+        <td class="px-4 py-2">
           {% if task.status == "done" %}
             <span class="inline-block px-2 py-0.5 rounded text-xs bg-green-900 text-green-300">done</span>
           {% elif task.status == "failed" %}
             <span class="inline-block px-2 py-0.5 rounded text-xs bg-red-900 text-red-300">failed</span>
+          {% elif task.status == "rejected" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-red-950 text-red-400">rejected</span>
           {% elif task.status == "in_progress" %}
             <span class="inline-block px-2 py-0.5 rounded text-xs bg-yellow-900 text-yellow-300">in progress</span>
+          {% elif task.status == "awaiting_approval" %}
+            <span class="inline-block px-2 py-0.5 rounded text-xs bg-orange-900 text-orange-300 animate-pulse">⏳ awaiting approval</span>
           {% else %}
             <span class="inline-block px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-400">pending</span>
           {% endif %}
@@ -88,12 +108,29 @@
         <td class="px-4 py-2 font-mono text-gray-500 text-xs truncate max-w-xs" title="{{ task.branch_name }}">
           {{ task.branch_name }}
         </td>
-        <td class="px-4 py-2 text-right">
-          {% if task.can_diff %}
-          <a href="/dashboard/runs/{{ thread_id }}/diff/{{ task.module_slug }}"
-             class="text-indigo-400 hover:text-indigo-300 underline">
-            View diff →
-          </a>
+        <td class="px-4 py-2 text-right whitespace-nowrap">
+          {% if task.awaiting_approval %}
+            <form method="post"
+                  action="/dashboard/runs/{{ thread_id }}/approve-task/{{ task.task_id }}"
+                  class="inline">
+              <button type="submit"
+                      class="px-2 py-0.5 rounded text-xs bg-green-800 hover:bg-green-700 text-green-200 transition-colors mr-1">
+                ✓ Approve
+              </button>
+            </form>
+            <form method="post"
+                  action="/dashboard/runs/{{ thread_id }}/reject-task/{{ task.task_id }}"
+                  class="inline">
+              <button type="submit"
+                      class="px-2 py-0.5 rounded text-xs bg-red-900 hover:bg-red-800 text-red-200 transition-colors">
+                ✗ Reject
+              </button>
+            </form>
+          {% elif task.can_diff %}
+            <a href="/dashboard/runs/{{ thread_id }}/diff/{{ task.module_slug }}"
+               class="text-indigo-400 hover:text-indigo-300 underline">
+              View diff →
+            </a>
           {% endif %}
         </td>
       </tr>

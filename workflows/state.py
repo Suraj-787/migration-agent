@@ -35,11 +35,12 @@ class MigrationTask(BaseModel):
     predicted_changes: list[str]
     retrieved_context_ids: list[str]
     depends_on: list[str]  # task_ids of tasks this task depends on
+    risk_level: Literal["low", "medium", "high"] = "low"
 
 
 class TaskResult(BaseModel):
     module_path: str
-    status: Literal["success", "failed", "skipped", "transformed"]
+    status: Literal["success", "failed", "skipped", "transformed", "rejected"]
     diff: str = ""
     error: str | None = None
     branch_name: str | None = None

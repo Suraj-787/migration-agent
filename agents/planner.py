@@ -59,6 +59,38 @@ class _PlannerLLMOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Risk assessment (heuristics, no LLM call)
+# ---------------------------------------------------------------------------
+
+_HIGH_RISK_PATH_PATTERNS = ("auth/", "/auth", "models.py", "migrations/", "/migrations")
+_HIGH_RISK_CHANGE_KEYWORDS = ("schema", "database", "authentication")
+_MEDIUM_RISK_PATH_PATTERNS = ("api/", "routes.py")
+_MEDIUM_RISK_CHANGE_KEYWORDS = ("endpoint", "public")
+
+
+def _assess_risk(
+    module_path: str,
+    predicted_changes: list[str],
+    line_count: int,
+) -> Literal["low", "medium", "high"]:
+    """Classify a task as low/medium/high risk using path, change, and size heuristics."""
+    path_lower = module_path.lower()
+    changes_text = " ".join(predicted_changes).lower()
+
+    path_high = any(p in path_lower for p in _HIGH_RISK_PATH_PATTERNS)
+    change_high = any(kw in changes_text for kw in _HIGH_RISK_CHANGE_KEYWORDS)
+    if path_high or change_high or line_count > 200:
+        return "high"
+
+    path_medium = any(p in path_lower for p in _MEDIUM_RISK_PATH_PATTERNS)
+    change_medium = any(kw in changes_text for kw in _MEDIUM_RISK_CHANGE_KEYWORDS)
+    if path_medium or change_medium:
+        return "medium"
+
+    return "low"
+
+
+# ---------------------------------------------------------------------------
 # Resource factories
 # ---------------------------------------------------------------------------
 
@@ -236,6 +268,7 @@ async def _store_task(task: MigrationTask, redis: Redis) -> None:
             "retrieved_context_ids": json.dumps(task.retrieved_context_ids),
             "depends_on": json.dumps(task.depends_on),
             "description": task.description,
+            "risk_level": task.risk_level,
             "status": "pending",
         },
     )
@@ -269,10 +302,11 @@ async def _plan_one_module(
         logger.warning("Planner: no source file for module={}, skipping", module)
         return None
 
-    file_content = await asyncio.to_thread(
+    full_content = await asyncio.to_thread(
         Path(file_path).read_text, encoding="utf-8", errors="replace"
     )
-    file_content = file_content[:_MAX_FILE_CHARS]
+    line_count = full_content.count("\n") + 1
+    file_content = full_content[:_MAX_FILE_CHARS]
 
     code_hits, doc_hits = await _retrieve_context(
         module, file_content, spec, code_retriever, doc_retriever
@@ -284,6 +318,12 @@ async def _plan_one_module(
     # Edges A→B mean A imports B, so B's task must run before A's.
     successors = list(dep_graph.graph.successors(module))
     depends_on = [module_to_task_id[s] for s in successors if s in module_to_task_id]
+
+    risk_level = _assess_risk(file_path, llm_out.predicted_changes, line_count)
+    if risk_level != "low":
+        logger.info(
+            "Planner: module={} risk={} lines={}", module, risk_level, line_count
+        )
 
     return MigrationTask(
         task_id=str(uuid.uuid4()),
@@ -297,6 +337,7 @@ async def _plan_one_module(
         predicted_changes=llm_out.predicted_changes,
         retrieved_context_ids=[h.id for h in code_hits + doc_hits],
         depends_on=depends_on,
+        risk_level=risk_level,
     )
 
 
