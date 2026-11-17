@@ -139,17 +139,6 @@ Tested on free-tier LLMs — Groq (100K tokens/day hard limit), OpenRouter free 
 - **Pre-existing mypy errors:** Several repos in the wild have mypy errors before migration. The critic's mypy gate reports these as failures even when the migration itself is correct. The `--ignore-errors` flag is intentionally not set so real regressions surface.
 - **Single-interrupt-at-a-time:** The human-in-the-loop gate processes high-risk tasks sequentially. If 5 modules need approval, the dashboard shows one at a time; you approve each before the next appears.
 
-## Dashboard Screenshots
-
-### Run list
-[screenshot — runs list with status badges and cost]
-
-### Run detail with approval gate
-[screenshot — run detail showing orange "Awaiting approval" badge with Approve/Reject buttons for auth/ module]
-
-### Diff view
-[screenshot — side-by-side diff of original vs migrated Flask route handler]
-
 ## Development
 
 ```bash
